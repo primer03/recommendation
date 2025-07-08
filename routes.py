@@ -125,31 +125,36 @@ async def recommend_by_bookID(bookID: str = Query(...), topn: int = 10):
     index.add(vectors)
     D, I = index.search(query_vec, topn)
 
+    # 🔹 เตรียมรายการ recommendation
     recommendations = []
     for rank, (idx, score) in enumerate(zip(I[0], D[0]), start=1):
         b = meta[idx]
-        b["score"] = float(score)
-        b["rank"] = rank
-        recommendations.append(b)
+        recommendations.append({
+            "bookID": b["bookID"],
+            "name": b["name"],
+            "tag": b["tag"],
+            "title": b["title"],
+            "score": float(score),
+            "rank": rank
+        })
 
-        # ⬇️ Check + insert or update
-        existing = await RecommendSimilar.filter(bookID=bookID, similarID=b["bookID"]).first()
-        if existing:
-            await existing.delete()  # ⬅️ ลบข้อมูลเก่าออกก่อน
-            print(f"🗑 ลบรายการเดิม: {bookID} → {b['bookID']}")
+    # 🔹 ลบของเดิมทั้งหมด
+    await RecommendSimilar.filter(bookID=bookID).delete()
+    print(f"🗑 ลบคำแนะนำเดิมทั้งหมดของ: {bookID}")
 
-        # ไม่ว่าเจอหรือไม่ ก็สร้างใหม่เสมอ
-        try:
-            await RecommendSimilar.create(
-                bookID=bookID,
-                similarID=b["bookID"],
-                score=b["score"],
-                rank=rank,
-                updated_at=datetime.now()
-            )
-            print(f"✅ สร้างใหม่: {bookID} → {b['bookID']} (rank {rank})")
-        except IntegrityError:
-            print(f"⚠️ duplicate recommend for {bookID} - {b['bookID']}")
+    # 🔹 สร้างใหม่ทั้งหมดด้วย bulk_create
+    reco_objs = [
+        RecommendSimilar(
+            bookID=bookID,
+            similarID=rec["bookID"],
+            score=rec["score"],
+            rank=rec["rank"],
+            updated_at=datetime.now()
+        )
+        for rec in recommendations
+    ]
+    await RecommendSimilar.bulk_create(reco_objs)
+    print(f"✅ เพิ่มคำแนะนำใหม่ {len(reco_objs)} รายการ สำหรับ {bookID}")
 
     return {
         "base_book": {
@@ -160,6 +165,7 @@ async def recommend_by_bookID(bookID: str = Query(...), topn: int = 10):
         },
         "recommendations": recommendations
     }
+
 
 @recommend_router.get("/recommend/random-similar")
 async def recommend_random_similar(q: str = Query(...), topn: int = 30, pick: int = 5):
