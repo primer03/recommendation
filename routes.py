@@ -6,6 +6,7 @@ from vector import get_vector
 from utils import cosine_similarity, get_clean_text_from_html
 from model import BookTran, UserHitRead,RecommendSimilar
 from datetime import datetime
+from fastapi import BackgroundTasks
 from tortoise.exceptions import IntegrityError
 
 from loader import (
@@ -18,6 +19,8 @@ from loader import (
 import numpy as np
 import pandas as pd
 import faiss
+
+is_recommend_running = False
 
 recommend_router = APIRouter()
 
@@ -35,79 +38,67 @@ async def recommend_by_keyword(request: RecommendRequest = Body(...)):
 
 
 @recommend_router.get("/recommend/all-books")
-async def recommend_all_books(topn: int = 10):
-    # 🔹 Load all books once
-    all_books = await BookTran.filter(status="publish").only("bookID", "name", "tag", "des", "title")
-    if not all_books:
-        return {"error": "ไม่พบข้อมูลนิยาย"}
+async def recommend_all_books_endpoint(topn: int = 10, background_tasks: BackgroundTasks = None):
+    global is_recommend_running
+    if is_recommend_running:
+        return {"status": "processing", "message": "กำลังสร้างคำแนะนำอยู่"}
+    
+    is_recommend_running = True
+    background_tasks.add_task(run_recommend_all_books, topn)
+    return {"status": "started", "message": "เริ่มประมวลผลใน background แล้ว"}
 
-    vectors = []
-    metas = []
-    for b in all_books:
-        tag_text = b.tag.replace(",", " ") if b.tag else ""
-        name_text = b.name or ""
-        title_text = b.title or ""
-        combined_text = f"{name_text} {tag_text} {title_text}"
-        vec = get_vector(combined_text)
-        vectors.append(vec)
-        metas.append({
-            "bookID": b.bookID,
-            "name": name_text,
-            "tag": tag_text,
-            "title": title_text
-        })
+async def run_recommend_all_books(topn: int):
+    global is_recommend_running
+    try:
+        all_books = await BookTran.filter(status="publish").only("bookID", "name", "tag", "des", "title")
+        if not all_books:
+            print("❌ ไม่พบข้อมูลนิยาย")
+            return
 
-    vectors = np.array(vectors, dtype=np.float32)
-    faiss.normalize_L2(vectors)
-    dim = vectors.shape[1]
-    index = faiss.IndexFlatIP(dim)
-    index.add(vectors)
-
-    total_updated = 0
-    for i, base in enumerate(metas):
-        bookID = base["bookID"]
-        query_vec = vectors[i].reshape(1, -1)
-        D, I = index.search(query_vec, topn + 1)  # +1 เผื่อมีตัวเอง
-
-        recommendations = []
-        for idx, score in zip(I[0], D[0]):
-            if idx == i:
-                continue  # ข้ามตัวเอง
-            sim = metas[idx]
-            recommendations.append({
-                "bookID": sim["bookID"],
-                "name": sim["name"],
-                "tag": sim["tag"],
-                "title": sim["title"],
-                "score": float(score),
-                "rank": len(recommendations) + 1
+        metas, vectors = [], []
+        for b in all_books:
+            text = f"{b.name or ''} {b.tag.replace(',', ' ') if b.tag else ''} {b.title or ''}"
+            metas.append({
+                "bookID": b.bookID,
+                "name": b.name,
+                "tag": b.tag,
+                "title": b.title,
             })
-            if len(recommendations) == topn:
-                break
+            vectors.append(get_vector(text))
 
-        # 🔹 Clear old recommendations for this book
-        await RecommendSimilar.filter(bookID=bookID).delete()
+        vectors = np.array(vectors, dtype=np.float32)
+        faiss.normalize_L2(vectors)
+        index = faiss.IndexFlatIP(vectors.shape[1])
+        index.add(vectors)
 
-        # 🔹 Create new recommendations in bulk
-        reco_objs = [
-            RecommendSimilar(
-                bookID=bookID,
-                similarID=rec["bookID"],
-                score=rec["score"],
-                rank=rec["rank"],
-                updated_at=datetime.now()
-            )
-            for rec in recommendations
-        ]
-        await RecommendSimilar.bulk_create(reco_objs)
-        total_updated += 1
-        print(f"✅ อัปเดต: {bookID} จำนวน {len(recommendations)} รายการ")
+        now = datetime.now()
+        for i, meta in enumerate(metas):
+            bookID = meta["bookID"]
+            query_vec = vectors[i].reshape(1, -1)
+            D, I = index.search(query_vec, topn + 1)
 
-    return {
-        "status": "ok",
-        "total_books": len(all_books),
-        "updated": total_updated
-    }
+            results = []
+            for idx, score in zip(I[0], D[0]):
+                if idx == i:
+                    continue
+                sim = metas[idx]
+                results.append(RecommendSimilar(
+                    bookID=bookID,
+                    similarID=sim["bookID"],
+                    score=float(score),
+                    rank=len(results) + 1,
+                    updated_at=now
+                ))
+                if len(results) == topn:
+                    break
+
+            await RecommendSimilar.filter(bookID=bookID).delete()
+            await RecommendSimilar.bulk_create(results)
+            print(f"✅ อัปเดต: {bookID} → {len(results)} รายการ")
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+    finally:
+        is_recommend_running = False  # ✅ ปลดล็อก
                     
         
 
