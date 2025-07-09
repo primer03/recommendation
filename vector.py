@@ -9,3 +9,4 @@ def get_vector(text: str):
     tokens = word_tokenize(text, keep_whitespace=False)
     vectors = [model[word] for word in tokens if word in model]
     return np.mean(vectors, axis=0).tolist() if vectors else [0]*model.vector_size
+

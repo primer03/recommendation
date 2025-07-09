@@ -8,6 +8,8 @@ from model import BookTran, UserHitRead,RecommendSimilar
 from datetime import datetime
 from fastapi import BackgroundTasks
 from tortoise.exceptions import IntegrityError
+from vectors.user_profile_vector import get_user_profile_vector
+from tortoise.expressions import Q
 
 from loader import (
     load_book_df,
@@ -138,23 +140,23 @@ async def recommend_by_bookID(bookID: str = Query(...), topn: int = 10):
             "rank": rank
         })
 
-    # 🔹 ลบของเดิมทั้งหมด
-    await RecommendSimilar.filter(bookID=bookID).delete()
-    print(f"🗑 ลบคำแนะนำเดิมทั้งหมดของ: {bookID}")
+    # # 🔹 ลบของเดิมทั้งหมด
+    # await RecommendSimilar.filter(bookID=bookID).delete()
+    # print(f"🗑 ลบคำแนะนำเดิมทั้งหมดของ: {bookID}")
 
-    # 🔹 สร้างใหม่ทั้งหมดด้วย bulk_create
-    reco_objs = [
-        RecommendSimilar(
-            bookID=bookID,
-            similarID=rec["bookID"],
-            score=rec["score"],
-            rank=rec["rank"],
-            updated_at=datetime.now()
-        )
-        for rec in recommendations
-    ]
-    await RecommendSimilar.bulk_create(reco_objs)
-    print(f"✅ เพิ่มคำแนะนำใหม่ {len(reco_objs)} รายการ สำหรับ {bookID}")
+    # # 🔹 สร้างใหม่ทั้งหมดด้วย bulk_create
+    # reco_objs = [
+    #     RecommendSimilar(
+    #         bookID=bookID,
+    #         similarID=rec["bookID"],
+    #         score=rec["score"],
+    #         rank=rec["rank"],
+    #         updated_at=datetime.now()
+    #     )
+    #     for rec in recommendations
+    # ]
+    # await RecommendSimilar.bulk_create(reco_objs)
+    # print(f"✅ เพิ่มคำแนะนำใหม่ {len(reco_objs)} รายการ สำหรับ {bookID}")
 
     return {
         "base_book": {
@@ -228,3 +230,50 @@ async def user_hit_read_multi(request: UserHitRequest = Body(...)):
         result_by_user[user_id] = top_df[["bookID", "name", "tag", "des", "score"]].to_dict(orient="records")
 
     return JSONResponse(content=result_by_user)
+
+@recommend_router.get("/user/recommend-profile")
+async def recommend_by_user(user_id: str, topn: int = 10):
+    profile_vec = await get_user_profile_vector(user_id)
+    if profile_vec is None:
+        return {"error": "ยังไม่มีพฤติกรรมการอ่าน"}
+
+    read_ids = await UserHitRead.filter(user_id=user_id).values_list("bt_id", flat=True)
+    books = await BookTran.filter(~Q(id__in=read_ids), status="publish").only("bookID", "name", "tag", "title")
+
+    vectors, metas = [], []
+    for b in books:
+        tag = b.tag.replace(",", " ") if b.tag else ""
+        name = b.name or ""
+        title = b.title or ""
+        vec = get_vector(f"{name} {tag} {title}")
+        if vec is None:
+            continue
+        vectors.append(vec)
+        metas.append({
+            "bookID": b.bookID,
+            "name": name,
+            "tag": tag,
+            "title": title,
+        })
+
+    if not vectors:
+        return {"error": "ไม่พบนิยายใหม่"}
+
+    vectors = np.array(vectors, dtype=np.float32)
+    query_vec = profile_vec.astype(np.float32).reshape(1, -1).copy()
+    faiss.normalize_L2(vectors)
+    faiss.normalize_L2(query_vec)
+
+    index = faiss.IndexFlatIP(vectors.shape[1])
+    index.add(vectors)
+    D, I = index.search(query_vec, topn)
+
+    return [
+        {
+            **metas[idx],
+            "score": float(score),
+            "rank": i + 1
+        }
+        for i, (idx, score) in enumerate(zip(I[0], D[0]))
+    ]
+

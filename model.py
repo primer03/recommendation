@@ -131,9 +131,7 @@ class RecommendSimilar(models.Model):
 
     class Meta:
         table = "recommend_similar"
-        unique_together = (("bookID", "similarID"),)  # ✅ ยัง enforce ว่าห้ามซ้ำ
-
-
+        unique_together = (("bookID", "similarID"),)
 
 # DB Initializer
 async def init_db():

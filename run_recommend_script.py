@@ -3,6 +3,7 @@ import numpy as np
 from datetime import datetime
 import faiss
 from tqdm import tqdm  # ⬅️ เพิ่มตรงนี้
+import sys
 
 from model import init_db, BookTran, RecommendSimilar
 from vector import get_vector
@@ -36,7 +37,8 @@ async def run_recommend_all_books(topn: int = 10):
     index.add(vectors)
 
     total_updated = 0
-    for i, base in enumerate(tqdm(metas, desc="🔄 คำนวณนิยายคล้ายกัน", ncols=100)):
+    for i, base in enumerate(
+    tqdm(metas, desc="🔄 คำนวณนิยายคล้ายกัน", ncols=100, dynamic_ncols=True, file=sys.stdout)):
         bookID = base["bookID"]
         query_vec = vectors[i].reshape(1, -1)
         D, I = index.search(query_vec, topn + 1)
